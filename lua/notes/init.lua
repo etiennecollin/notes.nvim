@@ -241,7 +241,7 @@ local function create_split_window(buf, display_mode)
 end
 
 --- Load notes content from file or return default content
---- @return table Lines of content
+--- @return table, boolean Lines of content and boolean indicating if the file is new.
 local function load_notes()
   local path = get_notes_path()
   local file = io.open(path, "r")
@@ -251,12 +251,12 @@ local function load_notes()
     file:close()
     -- Handle empty files
     if content == "" then
-      return { "" }
+      return { "" }, false
     end
-    return vim.split(content, "\n")
+    return vim.split(content, "\n"), false
   else
     -- Create default content for new users
-    return {
+    local default = {
       "# My Notes",
       "",
       "Welcome to notes.nvim!",
@@ -281,6 +281,7 @@ local function load_notes()
       "",
       "*Happy note-taking!*",
     }
+    return default, true
   end
 end
 
@@ -298,6 +299,10 @@ local function save_notes()
   if not vim.api.nvim_get_option_value("modified", { buf = buf }) then
     return true -- Nothing to save
   end
+
+  -- Trigger pre-write events
+  vim.api.nvim_exec_autocmds("BufWritePre", { buffer = buf })
+  vim.api.nvim_exec_autocmds("FileWritePre", { buffer = buf })
 
   -- Ensure directory exists
   local dir = vim.fn.fnamemodify(path, ":h")
@@ -330,6 +335,10 @@ local function save_notes()
 
   -- Mark buffer as unmodified
   vim.api.nvim_set_option_value("modified", false, { buf = buf })
+
+  -- Trigger post-write events
+  vim.api.nvim_exec_autocmds("FileWritePost", { buffer = buf })
+  vim.api.nvim_exec_autocmds("BufWritePost", { buffer = buf })
 
   notify("Notes saved!")
   return true
@@ -482,8 +491,19 @@ local function get_or_create_buffer()
   end
 
   -- Load content
-  local content = load_notes()
+  local content, is_new = load_notes()
+
+  if is_new then
+    vim.api.nvim_exec_autocmds("BufNewFile", { buffer = buf })
+  else
+    vim.api.nvim_exec_autocmds("BufReadPre", { buffer = buf })
+  end
+
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, content)
+
+  if not is_new then
+    vim.api.nvim_exec_autocmds("BufReadPost", { buffer = buf })
+  end
 
   -- Mark as unmodified initially
   vim.api.nvim_set_option_value("modified", false, { buf = buf })
@@ -558,7 +578,10 @@ function M.show(display_mode, notes_file_path)
 
   -- Focus the window
   vim.api.nvim_set_current_win(win)
-
+  vim.api.nvim_exec_autocmds("WinEnter", { buffer = buf })
+  vim.api.nvim_exec_autocmds("BufWinEnter", { buffer = buf })
+  vim.api.nvim_exec_autocmds("BufEnter", { buffer = buf })
+  vim.api.nvim_exec_autocmds("FileType", { buffer = buf })
   return true
 end
 
@@ -577,10 +600,25 @@ function M.hide()
     save_notes()
   end
 
+  local path = get_notes_path()
+  local buf = state.buffers[path]
+
+  -- Trigger leave events before closing
+  if buf and vim.api.nvim_buf_is_valid(buf) then
+    vim.api.nvim_exec_autocmds("BufLeave", { buffer = buf })
+    vim.api.nvim_exec_autocmds("BufWinLeave", { buffer = buf })
+    vim.api.nvim_exec_autocmds("WinLeave", { buffer = buf })
+  end
+
   -- Close window
   local ok, err = pcall(vim.api.nvim_win_close, state.win, false)
   if not ok then
     notify("Failed to close window: " .. tostring(err), vim.log.levels.WARN)
+  end
+
+  -- Trigger BufHidden after window is closed
+  if buf and vim.api.nvim_buf_is_valid(buf) then
+    vim.api.nvim_exec_autocmds("BufHidden", { buffer = buf })
   end
 
   state.win = nil
